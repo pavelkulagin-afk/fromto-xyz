@@ -9,19 +9,30 @@ on:
 
 env:
   R2_BUCKET: fromto-backups
-  R2_ENDPOINT: https://	pavelkulagin-afk.r2.cloudflarestorage.com
+  R2_ENDPOINT: https://pavelkulagin-afk.cloudflarestorage.com
 
 jobs:
   pre-backup:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client restic
-
+      
+      - name: Debug secrets
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          echo "🔍 SUPABASE_DB_URL length: ${#SUPABASE_DB_URL}"
+          echo "🔍 First 20 chars: ${SUPABASE_DB_URL:0:20}..."
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "❌ ERROR: SUPABASE_DB_URL is empty!"
+            exit 1
+          fi
+      
       - name: Create DB snapshot
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
@@ -29,10 +40,28 @@ jobs:
           echo "📦 Creating database dump..."
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           BACKUP_FILE="fromto_backup_${TIMESTAMP}.dump"
-          pg_dump --dbname="$SUPABASE_DB_URL" -F c -f "$BACKUP_FILE"
+          
+          # Парсим connection string: postgresql://user:pass@host:port/dbname
+          DB_USER=$(echo "$SUPABASE_DB_URL" | sed -n 's|.*://\([^:]*\):.*|\1|p')
+          DB_PASS=$(echo "$SUPABASE_DB_URL" | sed -n 's|.*://[^:]*:\([^@]*\)@.*|\1|p')
+          DB_HOST=$(echo "$SUPABASE_DB_URL" | sed -n 's|.*@\([^:/]*\):.*|\1|p')
+          DB_PORT=$(echo "$SUPABASE_DB_URL" | sed -n 's|.*:[0-9]\+/\(.*\)|\1|p' | cut -d'/' -f1)
+          DB_NAME=$(echo "$SUPABASE_DB_URL" | sed -n 's|.*/\([^?]*\).*|\1|p')
+          
+          echo "🔍 Parsed: host=$DB_HOST port=5432 user=$DB_USER db=$DB_NAME"
+          
+          # Создаём дамп с явными параметрами
+          PGPASSWORD="$DB_PASS" pg_dump \
+            -h "$DB_HOST" \
+            -p 5432 \
+            -U "$DB_USER" \
+            -d "$DB_NAME" \
+            -F c \
+            -f "$BACKUP_FILE"
+          
           echo "BACKUP_FILE=$BACKUP_FILE" >> $GITHUB_ENV
           echo "✅ Dump created: $BACKUP_FILE"
-
+      
       - name: Upload to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY }}
@@ -50,18 +79,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-
       - name: Install & Build
         run: |
           npm ci
           npm run build
-
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
