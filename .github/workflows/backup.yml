@@ -9,19 +9,19 @@ on:
 
 env:
   R2_BUCKET: fromto-backups
-  R2_ENDPOINT: https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+  R2_ENDPOINT: https://	pavelkulagin-afk.r2.cloudflarestorage.com
 
 jobs:
   pre-backup:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client restic
-      
+
       - name: Create DB snapshot
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
@@ -29,13 +29,10 @@ jobs:
           echo "📦 Creating database dump..."
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           BACKUP_FILE="fromto_backup_${TIMESTAMP}.dump"
-          
-          # pg_dump принимает postgres:// URL напрямую
           pg_dump --dbname="$SUPABASE_DB_URL" -F c -f "$BACKUP_FILE"
-          
           echo "BACKUP_FILE=$BACKUP_FILE" >> $GITHUB_ENV
           echo "✅ Dump created: $BACKUP_FILE"
-      
+
       - name: Upload to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY }}
@@ -53,18 +50,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-      
+
       - name: Install & Build
         run: |
           npm ci
           npm run build
-      
+
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
