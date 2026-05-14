@@ -1,25 +1,73 @@
-- name: Create DB snapshot
-  env:
-    SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-  run: |
-    echo "📦 Creating database dump..."
-    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    
-    # Извлекаем компоненты из connection string
-    DB_HOST=$(echo "$SUPABASE_DB_URL" | grep -oP '@\K[^:/]+')
-    DB_PORT=$(echo "$SUPABASE_DB_URL" | grep -oP ':\K[0-9]+(?=/)')
-    DB_NAME=$(echo "$SUPABASE_DB_URL" | grep -oP '/\K[^?]+')
-    DB_USER=$(echo "$SUPABASE_DB_URL" | grep -oP 'postgres://\K[^:]+')
-    DB_PASS=$(echo "$SUPABASE_DB_URL" | grep -oP ':[^@]+@' | tr -d ':@')
-    
-    # Создаём дамп с явными параметрами
-    PGPASSWORD="$DB_PASS" pg_dump \
-      -h "$DB_HOST" \
-      -p "$DB_PORT" \
-      -U "$DB_USER" \
-      -d "$DB_NAME" \
-      -F c \
-      -f "fromto_backup_${TIMESTAMP}.dump"
-    
-    echo "BACKUP_FILE=fromto_backup_${TIMESTAMP}.dump" >> $GITHUB_ENV
-    echo "✅ Dump created: fromto_backup_${TIMESTAMP}.dump"
+name: Backup & Deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  R2_BUCKET: fromto-backups
+  R2_ENDPOINT: https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+
+jobs:
+  pre-backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client restic
+      
+      - name: Create DB snapshot
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          echo "📦 Creating database dump..."
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_FILE="fromto_backup_${TIMESTAMP}.dump"
+          
+          # pg_dump принимает postgres:// URL напрямую
+          pg_dump --dbname="$SUPABASE_DB_URL" -F c -f "$BACKUP_FILE"
+          
+          echo "BACKUP_FILE=$BACKUP_FILE" >> $GITHUB_ENV
+          echo "✅ Dump created: $BACKUP_FILE"
+      
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_KEY }}
+          RESTIC_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+        run: |
+          export AWS_ENDPOINT_URL=${{ env.R2_ENDPOINT }}
+          restic init --repo r2://${{ env.R2_BUCKET }}/backups 2>/dev/null || true
+          restic backup --repo r2://${{ env.R2_BUCKET }}/backups "$BACKUP_FILE"
+          restic forget --repo r2://${{ env.R2_BUCKET }}/backups --keep-daily 7 --prune
+          rm -f "$BACKUP_FILE"
+
+  deploy:
+    needs: pre-backup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install & Build
+        run: |
+          npm ci
+          npm run build
+      
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=fromto
