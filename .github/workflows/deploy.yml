@@ -1,0 +1,44 @@
+name: Deploy + Backup + Optimize
+on:
+  push: { branches: [main] }
+  workflow_dispatch:
+
+jobs:
+  pre-backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create DB snapshot
+        run: |
+          pg_dump $SUPABASE_URL > backup_$(date +%Y%m%d_%H%M).sql
+      - name: Upload to R2
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.R2_TOKEN }}
+          command: r2 object put fromto-backups/backup_$(date +%Y%m%d_%H%M).sql --file=backup_*.sql
+
+  build-and-deploy:
+    needs: pre-backup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - run: npm ci
+      - run: npm run build
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          command: pages deploy dist --project-name=fromto
+
+  post-optimize:
+    needs: build-and-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger optimization
+        run: |
+          curl -X POST https://fromto.xyz/api/optimize \
+            -H "Authorization: Bearer ${{ secrets.OPTIMIZE_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"action":"cleanup"}'

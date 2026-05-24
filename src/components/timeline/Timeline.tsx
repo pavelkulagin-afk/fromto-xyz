@@ -1,107 +1,112 @@
-"use client"
-
-import { useState, useMemo } from "react"
-import { DndContext, closestCenter, DragEndEvent } from "@dnd-kit/core"
-import { SortableContext, verticalListSortingStrategy, arrayMove } from "@dnd-kit/sortable"
-import { Button } from "@/components/ui/button"
-import { Plus, GitFork } from "lucide-react"
-import { StepCard } from "./StepCard"
-import { StepEditor } from "./StepEditor"
-import { Step, Trail, StepFormData } from "@/types/trail"
+'use client'
+import { useState, useCallback, useEffect } from 'react'
+import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
+import { SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { motion, AnimatePresence } from 'framer-motion'
+import { Cloud, CloudOff, Plus } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { TimelineStep } from '@/types'
+import { TimelineStepItem } from './TimelineStepItem'
+import { StepEditor } from './StepEditor'
+import { useOffline } from '@/hooks/useOffline'
+import { Button } from '@/components/ui/button'
 
 interface TimelineProps {
-  trail?: Trail
-  isEditable?: boolean
-  onStepsChange?: (steps: Step[]) => void
-  onRemix?: (trail: Trail) => void
+  steps: TimelineStep[]
+  onChange?: (s: TimelineStep[]) => void
+  editable?: boolean
 }
 
-export function Timeline({ trail, isEditable = false, onStepsChange, onRemix }: TimelineProps) {
-  const [steps, setSteps] = useState<Step[]>(trail?.steps || [])
-  const [editorOpen, setEditorOpen] = useState(false)
-  const [editingStep, setEditingStep] = useState<Step | null>(null)
+export function Timeline({ steps = [], onChange, editable = false }: TimelineProps) {
+  const [localSteps, setLocalSteps] = useState<TimelineStep[]>(steps)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [showAdd, setShowAdd] = useState(false)
+  const { isOffline } = useOffline()
 
-  const sortedSteps = useMemo(() => 
-    [...steps].sort((a, b) => a.order - b.order), 
-    [steps]
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   )
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const { data: fetchedSteps } = useQuery({
+    queryKey: ['trail', 'steps'],
+    queryFn: async () => {
+      try {
+        const res = await fetch('/api/trails/steps')
+        if (!res.ok) return []
+        return res.json()
+      } catch { return [] }
+    },
+    enabled: !steps.length,
+  })
+
+  useEffect(() => {
+    if (fetchedSteps) setLocalSteps(fetchedSteps)
+  }, [fetchedSteps])
+
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event
     if (!over || active.id === over.id) return
-    
-    const oldIndex = sortedSteps.findIndex(s => s.id === active.id)
-    const newIndex = sortedSteps.findIndex(s => s.id === over.id)
-    
-    const newSteps = arrayMove(sortedSteps, oldIndex, newIndex).map((step, index) => ({
-      ...step,
-      order: index + 1,
-    }))
-    
-    setSteps(newSteps)
-    onStepsChange?.(newSteps)
-  }
+    const newSteps = [...localSteps]
+    const oldIndex = newSteps.findIndex(s => s.id === active.id)
+    const newIndex = newSteps.findIndex(s => s.id === over.id)
+    const [moved] = newSteps.splice(oldIndex, 1)
+    newSteps.splice(newIndex, 0, { ...moved, orderIndex: newIndex, isSynced: false })
+    const reordered = newSteps.map((s, i) => ({ ...s, orderIndex: i }))
+    setLocalSteps(reordered)
+    onChange?.(reordered)
+  }, [localSteps, onChange])
 
-  const handleSaveStep = (data: StepFormData) => {
-    if (editingStep) {
-      const updated = steps.map(s => s.id === editingStep.id ? { ...s, ...data } : s)
-      setSteps(updated)
-      onStepsChange?.(updated)
-    } else {
-      const newStep: Step = {
-        id: crypto.randomUUID(),
-        order: steps.length + 1,
-        createdAt: new Date().toISOString(),
-        ...data,
-      }
-      const updated = [...steps, newStep]
-      setSteps(updated)
-      onStepsChange?.(updated)
-    }
-    setEditingStep(null)
-  }
+  const handleAdd = useCallback((newStep: Omit<TimelineStep, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const step: TimelineStep = { ...newStep, id: crypto.randomUUID(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isSynced: !isOffline }
+    const updated = [...localSteps, step].map((s, i) => ({ ...s, orderIndex: i }))
+    setLocalSteps(updated)
+    setShowAdd(false)
+    onChange?.(updated)
+  }, [localSteps, isOffline, onChange])
 
-  const handleDeleteStep = (id: string) => {
-    const updated = steps.filter(s => s.id !== id).map((s, i) => ({ ...s, order: i + 1 }))
-    setSteps(updated)
-    onStepsChange?.(updated)
-  }
+  const handleUpdate = useCallback((updated: TimelineStep) => {
+    const newSteps = localSteps.map(s => s.id === updated.id ? { ...updated, updatedAt: new Date().toISOString(), isSynced: !isOffline } : s)
+    setLocalSteps(newSteps)
+    setEditingId(null)
+    onChange?.(newSteps)
+  }, [localSteps, isOffline, onChange])
+
+  const handleDelete = useCallback((id: string) => {
+    const newSteps = localSteps.filter(s => s.id !== id).map((s, i) => ({ ...s, orderIndex: i }))
+    setLocalSteps(newSteps)
+    onChange?.(newSteps)
+  }, [localSteps, onChange])
+
+  if (!Array.isArray(localSteps)) return <div className="p-4 text-muted-foreground">Загрузка...</div>
 
   return (
     <div className="space-y-4">
-      <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-        <SortableContext items={sortedSteps.map(s => s.id)} strategy={verticalListSortingStrategy}>
-          {sortedSteps.map(step => (
-            <StepCard
-              key={step.id}
-              step={step}
-              isEditing={isEditable}
-              onEdit={(s) => { setEditingStep(s); setEditorOpen(true) }}
-              onDelete={handleDeleteStep}
-            />
-          ))}
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        {isOffline ? <><CloudOff className="h-4 w-4 text-amber-500" /> Офлайн</> : <><Cloud className="h-4 w-4 text-emerald-500" /> Онлайн</>}
+      </div>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <SortableContext items={localSteps.map(s => s.id)} strategy={verticalListSortingStrategy}>
+          <AnimatePresence mode="popLayout">
+            {localSteps.map((step, index) => (
+              <motion.div key={step.id} layout>
+                {editingId === step.id ? (
+                  <StepEditor step={step as any} onSave={handleUpdate} onCancel={() => setEditingId(null)} />
+                ) : (
+                  <TimelineStepItem step={step} index={index} editable={editable} onEdit={() => setEditingId(step.id)} onDelete={() => handleDelete(step.id)} />
+                )}
+              </motion.div>
+            ))}
+          </AnimatePresence>
         </SortableContext>
       </DndContext>
-
-      {isEditable && (
-        <div className="flex gap-2 pt-4">
-          <Button onClick={() => { setEditingStep(null); setEditorOpen(true) }}>
-            <Plus className="h-4 w-4 mr-2" /> Добавить шаг
-          </Button>
-          {trail && onRemix && (
-            <Button variant="outline" onClick={() => onRemix(trail)}>
-              <GitFork className="h-4 w-4 mr-2" /> Remix этот трейл
-            </Button>
-          )}
-        </div>
+      {showAdd ? (
+        <StepEditor orderIndex={localSteps.length} onSave={handleAdd} onCancel={() => setShowAdd(false)} />
+      ) : editable && (
+        <Button variant="outline" className="w-full border-dashed" onClick={() => setShowAdd(true)}>
+          <Plus className="mr-2 h-4 w-4" /> Добавить шаг
+        </Button>
       )}
-
-      <StepEditor
-        open={editorOpen}
-        onOpenChange={setEditorOpen}
-        step={editingStep}
-        onSave={handleSaveStep}
-      />
     </div>
   )
 }
